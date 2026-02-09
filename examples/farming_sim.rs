@@ -480,9 +480,10 @@ fn init_entities(
         Transform::from_xyz(6.0, 6.0, 4.0).looking_at(Vec3::new(0.0, -1.0, 0.0), Vec3::Y),
     ));
 
-    commands.insert_resource(AmbientLight {
+    commands.insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: 700.0,
+        affects_lightmapped_meshes: true,
         ..default()
     });
 
