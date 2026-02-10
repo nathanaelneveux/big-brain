@@ -81,7 +81,7 @@ fn main() {
         .add_systems(Update, thirst_system)
         // Big Brain has specific sets for Scorers and Actions. If
         // determinism matters a lot to you, you should add your action and
-        // scorer systems to these stages.
+        // scorer systems to these sets.
         .add_systems(
             PreUpdate,
             one_off_action_system.in_set(BigBrainSet::Actions),
