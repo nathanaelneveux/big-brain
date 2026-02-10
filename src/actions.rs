@@ -251,7 +251,16 @@ pub fn steps_system(
     use ActionState::*;
     for (seq_ent, Actor(actor), mut steps_action, _span) in steps_q.iter_mut() {
         let active_ent = steps_action.active_ent.entity();
-        let current_state = states.get_mut(seq_ent).unwrap().clone();
+        let current_state = match states.get_mut(seq_ent) {
+            Ok(state) => state.clone(),
+            Err(_) => {
+                debug!(
+                    "Steps action missing ActionState; skipping entity {:?}",
+                    seq_ent
+                );
+                continue;
+            }
+        };
         #[cfg(feature = "trace")]
         let _guard = _span.span().enter();
         match current_state {
@@ -262,11 +271,34 @@ pub fn steps_system(
                     "Initializing StepsAction and requesting first step: {:?}",
                     active_ent
                 );
-                *states.get_mut(active_ent).unwrap() = Requested;
-                *states.get_mut(seq_ent).unwrap() = Executing;
+                let mut missing_child = false;
+                if let Ok(mut active_state) = states.get_mut(active_ent) {
+                    *active_state = Requested;
+                } else {
+                    debug!(
+                        "Steps child action missing ActionState; failing parent {:?}",
+                        seq_ent
+                    );
+                    missing_child = true;
+                }
+                if let Ok(mut seq_state) = states.get_mut(seq_ent) {
+                    *seq_state = if missing_child { Failure } else { Executing };
+                }
             }
             Executing => {
-                let mut step_state = states.get_mut(active_ent).unwrap();
+                let mut step_state = match states.get_mut(active_ent) {
+                    Ok(state) => state,
+                    Err(_) => {
+                        debug!(
+                            "Steps child action missing ActionState while executing; failing parent {:?}",
+                            seq_ent
+                        );
+                        if let Ok(mut seq_state) = states.get_mut(seq_ent) {
+                            *seq_state = Failure;
+                        }
+                        continue;
+                    }
+                };
                 match *step_state {
                     Init => {
                         // Request it! This... should not really happen? But just in case I'm missing something... :)
@@ -283,8 +315,9 @@ pub fn steps_system(
                         #[cfg(feature = "trace")]
                         trace!("Step {:?} failed. Failing entire StepsAction.", active_ent);
                         let step_state = step_state.clone();
-                        let mut seq_state = states.get_mut(seq_ent).expect("idk");
-                        *seq_state = step_state;
+                        if let Ok(mut seq_state) = states.get_mut(seq_ent) {
+                            *seq_state = step_state;
+                        }
                         if let Ok(mut ent) = cmd.get_entity(steps_action.active_ent.entity()) {
                             ent.despawn();
                         }
@@ -294,8 +327,9 @@ pub fn steps_system(
                         #[cfg(feature = "trace")]
                         trace!("StepsAction completed all steps successfully.");
                         let step_state = step_state.clone();
-                        let mut seq_state = states.get_mut(seq_ent).expect("idk");
-                        *seq_state = step_state;
+                        if let Ok(mut seq_state) = states.get_mut(seq_ent) {
+                            *seq_state = step_state;
+                        }
                         if let Ok(mut ent) = cmd.get_entity(steps_action.active_ent.entity()) {
                             ent.despawn();
                         }
@@ -322,11 +356,33 @@ pub fn steps_system(
                 // Cancel current action
                 #[cfg(feature = "trace")]
                 trace!("StepsAction has been cancelled. Cancelling current step {:?} before finalizing.", active_ent);
-                let mut step_state = states.get_mut(active_ent).expect("oops");
-                if *step_state == Requested || *step_state == Executing || *step_state == Init {
-                    *step_state = Cancelled;
-                } else if *step_state == Failure || *step_state == Success {
-                    *states.get_mut(seq_ent).unwrap() = step_state.clone();
+                let next_state = {
+                    let mut step_state = match states.get_mut(active_ent) {
+                        Ok(state) => state,
+                        Err(_) => {
+                            debug!(
+                                "Steps child action missing ActionState while cancelling; failing parent {:?}",
+                                seq_ent
+                            );
+                            if let Ok(mut seq_state) = states.get_mut(seq_ent) {
+                                *seq_state = Failure;
+                            }
+                            continue;
+                        }
+                    };
+                    if *step_state == Requested || *step_state == Executing || *step_state == Init {
+                        *step_state = Cancelled;
+                        None
+                    } else if *step_state == Failure || *step_state == Success {
+                        Some(step_state.clone())
+                    } else {
+                        None
+                    }
+                };
+                if let Some(next_state) = next_state {
+                    if let Ok(mut seq_state) = states.get_mut(seq_ent) {
+                        *seq_state = next_state;
+                    }
                 }
             }
             Init | Success | Failure => {
@@ -459,7 +515,16 @@ pub fn concurrent_system(
 ) {
     use ActionState::*;
     for (seq_ent, concurrent_action, _span) in concurrent_q.iter() {
-        let current_state = states_q.get_mut(seq_ent).expect("uh oh").clone();
+        let current_state = match states_q.get_mut(seq_ent) {
+            Ok(state) => state.clone(),
+            Err(_) => {
+                debug!(
+                    "Concurrently action missing ActionState; skipping entity {:?}",
+                    seq_ent
+                );
+                continue;
+            }
+        };
         #[cfg(feature = "trace")]
         let _guard = _span.span.enter();
         match current_state {
@@ -470,12 +535,28 @@ pub fn concurrent_system(
                     concurrent_action.actions.len()
                 );
                 // Begin at the beginning
-                let mut current_state = states_q.get_mut(seq_ent).expect("uh oh");
-                *current_state = Executing;
+                if let Ok(mut current_state) = states_q.get_mut(seq_ent) {
+                    *current_state = Executing;
+                } else {
+                    continue;
+                }
+                let mut missing_child = false;
                 for action in concurrent_action.actions.iter() {
                     let child_ent = action.entity();
-                    let mut child_state = states_q.get_mut(child_ent).expect("uh oh");
-                    *child_state = Requested;
+                    if let Ok(mut child_state) = states_q.get_mut(child_ent) {
+                        *child_state = Requested;
+                    } else {
+                        debug!(
+                            "Concurrently child action missing ActionState; failing parent {:?}",
+                            seq_ent
+                        );
+                        missing_child = true;
+                    }
+                }
+                if missing_child {
+                    if let Ok(mut state_var) = states_q.get_mut(seq_ent) {
+                        *state_var = Failure;
+                    }
                 }
             }
             Executing => match concurrent_action.mode {
@@ -484,7 +565,18 @@ pub fn concurrent_system(
                     let mut failed_idx = None;
                     for (idx, action) in concurrent_action.actions.iter().enumerate() {
                         let child_ent = action.entity();
-                        let mut child_state = states_q.get_mut(child_ent).expect("uh oh");
+                        let mut child_state = match states_q.get_mut(child_ent) {
+                            Ok(state) => state,
+                            Err(_) => {
+                                all_success = false;
+                                failed_idx = Some(idx);
+                                debug!(
+                                    "Missing child ActionState in Join mode; failing parent {:?}",
+                                    seq_ent
+                                );
+                                continue;
+                            }
+                        };
                         match *child_state {
                             Failure => {
                                 failed_idx = Some(idx);
@@ -502,12 +594,15 @@ pub fn concurrent_system(
                         }
                     }
                     if all_success {
-                        let mut state_var = states_q.get_mut(seq_ent).expect("uh oh");
-                        *state_var = Success;
+                        if let Ok(mut state_var) = states_q.get_mut(seq_ent) {
+                            *state_var = Success;
+                        }
                     } else if let Some(idx) = failed_idx {
                         for action in concurrent_action.actions.iter().take(idx) {
                             let child_ent = action.entity();
-                            let mut child_state = states_q.get_mut(child_ent).expect("uh oh");
+                            let Ok(mut child_state) = states_q.get_mut(child_ent) else {
+                                continue;
+                            };
                             match *child_state {
                                 Failure | Success => {}
                                 _ => {
@@ -515,8 +610,9 @@ pub fn concurrent_system(
                                 }
                             }
                         }
-                        let mut state_var = states_q.get_mut(seq_ent).expect("uh oh");
-                        *state_var = Failure;
+                        if let Ok(mut state_var) = states_q.get_mut(seq_ent) {
+                            *state_var = Failure;
+                        }
                     }
                 }
                 ConcurrentMode::Race => {
@@ -524,7 +620,12 @@ pub fn concurrent_system(
                     let mut succeed_idx = None;
                     for (idx, action) in concurrent_action.actions.iter().enumerate() {
                         let child_ent = action.entity();
-                        let mut child_state = states_q.get_mut(child_ent).expect("uh oh");
+                        let mut child_state = match states_q.get_mut(child_ent) {
+                            Ok(state) => state,
+                            Err(_) => {
+                                continue;
+                            }
+                        };
                         match *child_state {
                             Failure => {}
                             Success => {
@@ -542,12 +643,15 @@ pub fn concurrent_system(
                         }
                     }
                     if all_failure {
-                        let mut state_var = states_q.get_mut(seq_ent).expect("uh oh");
-                        *state_var = Failure;
+                        if let Ok(mut state_var) = states_q.get_mut(seq_ent) {
+                            *state_var = Failure;
+                        }
                     } else if let Some(idx) = succeed_idx {
                         for action in concurrent_action.actions.iter().take(idx) {
                             let child_ent = action.entity();
-                            let mut child_state = states_q.get_mut(child_ent).expect("uh oh");
+                            let Ok(mut child_state) = states_q.get_mut(child_ent) else {
+                                continue;
+                            };
                             match *child_state {
                                 Failure | Success => {}
                                 _ => {
@@ -555,8 +659,9 @@ pub fn concurrent_system(
                                 }
                             }
                         }
-                        let mut state_var = states_q.get_mut(seq_ent).expect("uh oh");
-                        *state_var = Success;
+                        if let Ok(mut state_var) = states_q.get_mut(seq_ent) {
+                            *state_var = Success;
+                        }
                     }
                 }
             },
@@ -567,7 +672,10 @@ pub fn concurrent_system(
                 let mut any_success = false;
                 for action in concurrent_action.actions.iter() {
                     let child_ent = action.entity();
-                    let mut child_state = states_q.get_mut(child_ent).expect("uh oh");
+                    let Ok(mut child_state) = states_q.get_mut(child_ent) else {
+                        any_failed = true;
+                        continue;
+                    };
                     match *child_state {
                         Init => {}
                         Success => {
@@ -583,7 +691,9 @@ pub fn concurrent_system(
                     }
                 }
                 if all_done {
-                    let mut state_var = states_q.get_mut(seq_ent).expect("uh oh");
+                    let Ok(mut state_var) = states_q.get_mut(seq_ent) else {
+                        continue;
+                    };
                     match concurrent_action.mode {
                         ConcurrentMode::Race => {
                             if any_success {

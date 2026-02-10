@@ -2,7 +2,7 @@
 //! range of 0.0..=1.0. This module includes the ScorerBuilder trait and some
 //! built-in Composite Scorers.
 
-use std::{cmp::Ordering, sync::Arc};
+use std::sync::Arc;
 
 use bevy::prelude::*;
 
@@ -218,7 +218,10 @@ pub fn all_or_nothing_system(
     {
         let mut sum = 0.0;
         for Scorer(child) in children.iter() {
-            let score = scores.get_mut(*child).expect("where is it?");
+            let Ok(score) = scores.get_mut(*child) else {
+                sum = 0.0;
+                break;
+            };
             if score.0 < *threshold {
                 sum = 0.0;
                 break;
@@ -226,7 +229,9 @@ pub fn all_or_nothing_system(
                 sum += score.0;
             }
         }
-        let mut score = scores.get_mut(aon_ent).expect("where did it go?");
+        let Ok(mut score) = scores.get_mut(aon_ent) else {
+            continue;
+        };
         score.set(crate::evaluators::clamp(sum, 0.0, 1.0));
         #[cfg(feature = "trace")]
         {
@@ -343,13 +348,17 @@ pub fn sum_of_scorers_system(
     {
         let mut sum = 0.0;
         for Scorer(child) in children.iter() {
-            let score = scores.get_mut(*child).expect("where is it?");
+            let Ok(score) = scores.get_mut(*child) else {
+                continue;
+            };
             sum += score.0;
         }
         if sum < *threshold {
             sum = 0.0;
         }
-        let mut score = scores.get_mut(sos_ent).expect("where did it go?");
+        let Ok(mut score) = scores.get_mut(sos_ent) else {
+            continue;
+        };
         score.set(crate::evaluators::clamp(sum, 0.0, 1.0));
         #[cfg(feature = "trace")]
         {
@@ -483,7 +492,9 @@ pub fn product_of_scorers_system(
         let mut num_scorers = 0;
 
         for Scorer(child) in children.iter() {
-            let score = scores.get_mut(*child).expect("where is it?");
+            let Ok(score) = scores.get_mut(*child) else {
+                continue;
+            };
             product *= score.0;
             num_scorers += 1;
         }
@@ -500,7 +511,9 @@ pub fn product_of_scorers_system(
             product = 0.0;
         }
 
-        let mut score = scores.get_mut(sos_ent).expect("where did it go?");
+        let Ok(mut score) = scores.get_mut(sos_ent) else {
+            continue;
+        };
         score.set(product.clamp(0.0, 1.0));
         #[cfg(feature = "trace")]
         {
@@ -623,23 +636,19 @@ pub fn winning_scorer_system(
 ) {
     for (sos_ent, mut winning_scorer, _span) in query.iter_mut() {
         let (threshold, children) = (winning_scorer.threshold, &mut winning_scorer.scorers);
-        let mut all_scores = children
-            .iter()
-            .map(|Scorer(e)| scores.get(*e).expect("where is it?"))
-            .collect::<Vec<&Score>>();
-
-        all_scores.sort_by(|a, b| a.get().partial_cmp(&b.get()).unwrap_or(Ordering::Equal));
-        let winning_score_or_zero = match all_scores.last() {
-            Some(s) => {
-                if s.get() < threshold {
-                    0.0
-                } else {
-                    s.get()
-                }
-            }
-            None => 0.0,
+        let mut winning_score_or_zero: f32 = 0.0;
+        for Scorer(child) in children.iter() {
+            let Ok(score) = scores.get(*child) else {
+                continue;
+            };
+            winning_score_or_zero = winning_score_or_zero.max(score.get());
+        }
+        if winning_score_or_zero < threshold {
+            winning_score_or_zero = 0.0;
+        }
+        let Ok(mut score) = scores.get_mut(sos_ent) else {
+            continue;
         };
-        let mut score = scores.get_mut(sos_ent).expect("where did it go?");
         score.set(crate::evaluators::clamp(winning_score_or_zero, 0.0, 1.0));
         #[cfg(feature = "trace")]
         {
@@ -760,12 +769,14 @@ pub fn evaluating_scorer_system(
 ) {
     for (sos_ent, eval_scorer, _span) in query.iter() {
         // Get the inner score
-        let inner_score = scores
-            .get(eval_scorer.scorer.0)
-            .expect("where did it go?")
-            .get();
+        let Ok(inner_score) = scores.get(eval_scorer.scorer.0) else {
+            continue;
+        };
+        let inner_score = inner_score.get();
         // Get composite score
-        let mut score = scores.get_mut(sos_ent).expect("where did it go?");
+        let Ok(mut score) = scores.get_mut(sos_ent) else {
+            continue;
+        };
         score.set(crate::evaluators::clamp(
             eval_scorer.evaluator.evaluate(inner_score),
             0.0,
@@ -903,10 +914,12 @@ pub fn measured_scorers_system(
         let measured_score = measure.calculate(
             children
                 .iter()
-                .map(|(scorer, weight)| (scores.get(scorer.0).expect("where is it?"), *weight))
+                .filter_map(|(scorer, weight)| scores.get(scorer.0).ok().map(|s| (s, *weight)))
                 .collect::<Vec<_>>(),
         );
-        let mut score = scores.get_mut(sos_ent).expect("where did it go?");
+        let Ok(mut score) = scores.get_mut(sos_ent) else {
+            continue;
+        };
 
         if measured_score < *threshold {
             score.set(0.0);

@@ -3,7 +3,8 @@
 use bevy::prelude::*;
 
 /**
-Trait that any evaluators must implement. Must return an `f32` value between `0.0..=100.0`.
+Trait that any evaluators must implement.
+Implementations should generally return values in the `0.0..=1.0` range.
  */
 #[reflect_trait]
 pub trait Evaluator: std::fmt::Debug + Sync + Send {
@@ -133,7 +134,7 @@ impl SigmoidEvaluator {
             xb,
             ya,
             yb,
-            two_over_dx: (2.0 / (xb - ya)).abs(),
+            two_over_dx: (2.0 / (xb - xa)).abs(),
             x_mean: (xa + xb) / 2.0,
             y_mean: (ya + yb) / 2.0,
             dy_over_two: (yb - ya) / 2.0,
