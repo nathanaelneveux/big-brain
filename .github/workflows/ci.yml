@@ -10,16 +10,16 @@ jobs:
     name: Check fmt & build docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           components: rustfmt
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: docs
-        run: cargo doc --no-deps
+        run: cargo doc --no-deps --all-features
 
   build_and_test:
     name: Build & Test
@@ -30,15 +30,17 @@ jobs:
         os: [ubuntu-latest, macOS-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.rust }}
           components: clippy
       - if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get install g++ pkg-config libx11-dev libasound2-dev libudev-dev
       - name: Clippy
-        run: cargo clippy --all -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: cargo test --all --verbose
+        run: cargo test --all-targets --all-features --verbose
+      - name: Run doc tests
+        run: cargo test --doc --all-features --verbose

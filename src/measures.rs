@@ -1,6 +1,6 @@
 //! * A series of
 //!   [Measures](https://en.wikipedia.org/wiki/Measure_(mathematics)) used to
-//!  * weight score.
+//!   weight scores.
 
 use bevy::prelude::*;
 
@@ -34,13 +34,13 @@ impl Measure for WeightedProduct {
     fn calculate(&self, scores: Vec<(&Score, f32)>) -> f32 {
         scores
             .iter()
-            .fold(0f32, |acc, (score, weight)| acc * score.0 * weight)
+            .fold(1f32, |acc, (score, weight)| acc * score.0 * weight)
     }
 }
 
-/// A measure that returns the max of the weighted child scares based on the
-/// one-dimensional (Chebychev
-/// Distance)[https://en.wikipedia.org/wiki/Chebyshev_distance].
+/// A measure that returns the max of the weighted child scores based on the
+/// one-dimensional
+/// [Chebyshev distance](https://en.wikipedia.org/wiki/Chebyshev_distance).
 #[derive(Debug, Clone, Reflect)]
 pub struct ChebyshevDistance;
 

@@ -386,7 +386,7 @@ pub fn move_to_nearest_system<T: Component + std::fmt::Debug + Clone>(
                         let delta_b = *b - actor_transform.translation;
                         delta_a.length().partial_cmp(&delta_b.length()).unwrap()
                     })
-                    .and_then(|t| Some(t.1));
+                    .map(|t| t.1);
                 let Some(goal_transform) = goal_transform else {
                     continue;
                 };
@@ -484,7 +484,6 @@ fn init_entities(
         color: Color::WHITE,
         brightness: 700.0,
         affects_lightmapped_meshes: true,
-        ..default()
     });
 
     commands.spawn((
@@ -536,7 +535,6 @@ fn init_entities(
         Mesh3d(meshes.add(Mesh::from(Capsule3d {
             half_length: 0.15,
             radius: 0.1,
-            ..default()
         }))),
         MeshMaterial3d(materials.add(DEFAULT_COLOR)),
         Transform::from_xyz(0.0, 0.5, 0.0),
@@ -631,9 +629,7 @@ fn main() {
         .add_systems(Update, check_scene_loaded)
         // This observer will attach components to entities in the scene based on their names.
         .add_observer(
-            |trigger: On<SceneLoaded>,
-             query: Query<(Entity, &Name)>,
-             mut commands: Commands| {
+            |trigger: On<SceneLoaded>, query: Query<(Entity, &Name)>, mut commands: Commands| {
                 for entity in trigger.event().entities.iter() {
                     if let Ok((entity, name)) = query.get(*entity) {
                         let mut entity_commands = commands.entity(entity);

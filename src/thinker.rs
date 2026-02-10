@@ -121,7 +121,7 @@ impl ScorerSpan {
 ///         Thirst(70.0, 2.0),
 ///         Hunger(50.0, 3.0),
 ///         Thinker::build()
-///             .picker(FirstToScore::new(80.0))
+///             .picker(FirstToScore::new(0.8))
 ///             .when(Thirsty, Drink)
 ///             .when(Hungry, Eat)
 ///             .otherwise(Meander),
@@ -313,6 +313,26 @@ impl Default for ThinkerIterations {
     }
 }
 
+fn cloned_action_state(
+    states: &mut Query<&mut ActionState>,
+    entity: Entity,
+) -> Option<ActionState> {
+    states.get_mut(entity).ok().map(|state| state.clone())
+}
+
+fn set_action_state(
+    states: &mut Query<&mut ActionState>,
+    entity: Entity,
+    next: ActionState,
+) -> bool {
+    if let Ok(mut state) = states.get_mut(entity) {
+        *state = next;
+        true
+    } else {
+        false
+    }
+}
+
 pub fn thinker_system(
     mut cmd: Commands,
     mut iterations: Local<ThinkerIterations>,
@@ -326,32 +346,44 @@ pub fn thinker_system(
     for (thinker_ent, Actor(actor), mut thinker) in thinker_q.iter_mut().skip(iterations.index) {
         iterations.index += 1;
 
-        let thinker_state = action_states
-            .get_mut(thinker_ent)
-            .expect("Where is it?")
-            .clone();
+        let thinker_state = match cloned_action_state(&mut action_states, thinker_ent) {
+            Some(state) => state,
+            None => {
+                debug!(
+                    "Thinker entity {:?} is missing ActionState, skipping.",
+                    thinker_ent
+                );
+                continue;
+            }
+        };
 
         let thinker_span = thinker.span.clone();
         let _thinker_span_guard = thinker_span.enter();
 
         match thinker_state {
             ActionState::Init => {
-                let mut act_state = action_states.get_mut(thinker_ent).expect("???");
                 debug!("Initializing thinker.");
-                *act_state = ActionState::Requested;
+                let _ = set_action_state(&mut action_states, thinker_ent, ActionState::Requested);
             }
             ActionState::Requested => {
-                let mut act_state = action_states.get_mut(thinker_ent).expect("???");
                 debug!("Thinker requested. Starting execution.");
-                *act_state = ActionState::Executing;
+                let _ = set_action_state(&mut action_states, thinker_ent, ActionState::Executing);
             }
             ActionState::Success | ActionState::Failure => {}
             ActionState::Cancelled => {
                 debug!("Thinker cancelled. Cleaning up.");
                 if let Some(current) = &mut thinker.current_action {
-                    let action_span = action_spans.get(current.0 .0).expect("Where is it?");
                     debug!("Cancelling current action because thinker was cancelled.");
-                    let state = action_states.get_mut(current.0.0).expect("Couldn't find a component corresponding to the current action. This is definitely a bug.").clone();
+                    let state = match cloned_action_state(&mut action_states, current.0 .0) {
+                        Some(state) => state,
+                        None => {
+                            debug!(
+                                "Current action is missing ActionState; dropping action handle."
+                            );
+                            thinker.current_action = None;
+                            continue;
+                        }
+                    };
                     match state {
                         ActionState::Success | ActionState::Failure => {
                             debug!("Action already wrapped up on its own. Cleaning up action in Thinker.");
@@ -364,18 +396,22 @@ pub fn thinker_system(
                             debug!("Current action already cancelled.");
                         }
                         _ => {
-                            let mut state = action_states.get_mut(current.0.0).expect("Couldn't find a component corresponding to the current action. This is definitely a bug.");
                             debug!( "Action is still executing. Attempting to cancel it before wrapping up Thinker cancellation.");
-                            action_span.span.in_scope(|| {
-                                debug!("Parent thinker was cancelled. Cancelling action.");
-                            });
-                            *state = ActionState::Cancelled;
+                            if let Ok(action_span) = action_spans.get(current.0 .0) {
+                                action_span.span.in_scope(|| {
+                                    debug!("Parent thinker was cancelled. Cancelling action.");
+                                });
+                            }
+                            let _ = set_action_state(
+                                &mut action_states,
+                                current.0 .0,
+                                ActionState::Cancelled,
+                            );
                         }
                     }
                 } else {
-                    let mut act_state = action_states.get_mut(thinker_ent).expect("???");
                     debug!("No current thinker action. Wrapping up Thinker as Succeeded.");
-                    *act_state = ActionState::Success;
+                    let _ = set_action_state(&mut action_states, thinker_ent, ActionState::Success);
                 }
             }
             ActionState::Executing => {
@@ -389,7 +425,13 @@ pub fn thinker_system(
                     trace!("Action picked. Executing picked action.");
                     let action = choice.action.clone();
                     let scorer = choice.scorer;
-                    let score = scores.get(choice.scorer.0).expect("Where is it?");
+                    let Ok(score) = scores.get(choice.scorer.0) else {
+                        debug!(
+                            "Picked scorer {:?} is missing Score; skipping tick.",
+                            choice.scorer.0
+                        );
+                        continue;
+                    };
                     exec_picked_action(
                         &mut cmd,
                         *actor,
@@ -403,13 +445,11 @@ pub fn thinker_system(
                     );
                 } else if should_schedule_action(&mut thinker, &mut action_states) {
                     debug!("Spawning scheduled action.");
-                    let action = thinker
-                        .scheduled_actions
-                        .pop_front()
-                        .expect("we literally just checked if it was there.");
-                    let new_action = actions::spawn_action(action.1.as_ref(), &mut cmd, *actor);
-                    thinker.current_action = Some((Action(new_action), action.clone()));
-                    thinker.current_action_label = Some(action.1.label().map(|s| s.into()));
+                    if let Some(action) = thinker.scheduled_actions.pop_front() {
+                        let new_action = actions::spawn_action(action.1.as_ref(), &mut cmd, *actor);
+                        thinker.current_action = Some((Action(new_action), action.clone()));
+                        thinker.current_action_label = Some(action.1.label().map(|s| s.into()));
+                    }
                 } else if let Some(default_action_ent) = &thinker.otherwise {
                     // Otherwise, let's just execute the default one! (if it's there)
                     let default_action_ent = default_action_ent.clone();
@@ -425,13 +465,23 @@ pub fn thinker_system(
                         false,
                     );
                 } else if let Some((action_ent, _)) = &thinker.current_action {
-                    let action_span = action_spans.get(action_ent.0).expect("Where is it?");
-                    let _guard = action_span.span.enter();
-                    let mut curr_action_state = action_states.get_mut(action_ent.0).expect("Couldn't find a component corresponding to the current action. This is definitely a bug.");
+                    let curr_action_state = cloned_action_state(&mut action_states, action_ent.0);
+                    let Some(curr_action_state) = curr_action_state else {
+                        debug!(
+                            "Current action {:?} has no ActionState; clearing handle.",
+                            action_ent.0
+                        );
+                        thinker.current_action = None;
+                        continue;
+                    };
                     let previous_done = matches!(
-                        *curr_action_state,
+                        curr_action_state,
                         ActionState::Success | ActionState::Failure
                     );
+                    let _guard = action_spans
+                        .get(action_ent.0)
+                        .ok()
+                        .map(|action_span| action_span.span.enter());
                     if previous_done {
                         debug!(
                             "Action completed and nothing was picked. Despawning action entity.",
@@ -441,13 +491,17 @@ pub fn thinker_system(
                             ent.despawn();
                         }
                         thinker.current_action = None;
-                    } else if *curr_action_state == ActionState::Init {
-                        *curr_action_state = ActionState::Requested;
+                    } else if curr_action_state == ActionState::Init {
+                        let _ = set_action_state(
+                            &mut action_states,
+                            action_ent.0,
+                            ActionState::Requested,
+                        );
                     }
                 }
             }
         }
-        if iterations.index % 500 == 0 && start.elapsed() > iterations.max_duration {
+        if iterations.index.is_multiple_of(500) && start.elapsed() > iterations.max_duration {
             return;
         }
     }
@@ -467,10 +521,16 @@ fn should_schedule_action(
         trace!("No scheduled actions. Not scheduling anything.");
         false
     } else if let Some((action_ent, _)) = &mut thinker.current_action {
-        let curr_action_state = states.get_mut(action_ent.0).expect("Couldn't find a component corresponding to the current action. This is definitely a bug.");
+        let Some(curr_action_state) = cloned_action_state(states, action_ent.0) else {
+            debug!(
+                "Current action {:?} missing ActionState; allowing scheduled action.",
+                action_ent.0
+            );
+            return true;
+        };
 
         let action_done = matches!(
-            *curr_action_state,
+            curr_action_state,
             ActionState::Success | ActionState::Failure
         );
 
@@ -515,13 +575,22 @@ fn exec_picked_action(
     let thinker_span = thinker.span.clone();
     let _thinker_span_guard = thinker_span.enter();
     if let Some((action_ent, ActionBuilderWrapper(current_id, _))) = &mut thinker.current_action {
-        let mut curr_action_state = states.get_mut(action_ent.0).expect("Couldn't find a component corresponding to the current action. This is definitely a bug.");
+        let Some(curr_action_state) = cloned_action_state(states, action_ent.0) else {
+            debug!(
+                "Current action {:?} missing ActionState; resetting current action.",
+                action_ent.0
+            );
+            thinker.current_action = None;
+            return;
+        };
         let previous_done = matches!(
-            *curr_action_state,
+            curr_action_state,
             ActionState::Success | ActionState::Failure
         );
-        let action_span = action_spans.get(action_ent.0).expect("Where is it?");
-        let _guard = action_span.span.enter();
+        let _guard = action_spans
+            .get(action_ent.0)
+            .ok()
+            .map(|action_span| action_span.span.enter());
         if (!Arc::ptr_eq(current_id, &picked_action.0) && override_current) || previous_done {
             // So we've picked a different action than we were
             // currently executing. Just like before, we grab the
@@ -537,10 +606,10 @@ fn exec_picked_action(
                     trace!("Picked a different action than the current one.",);
                 }
             }
-            match *curr_action_state {
+            match curr_action_state {
                 ActionState::Executing | ActionState::Requested => {
                     debug!("Previous action is still executing. Requesting action cancellation.",);
-                    *curr_action_state = ActionState::Cancelled;
+                    let _ = set_action_state(states, action_ent.0, ActionState::Cancelled);
                 }
                 ActionState::Init | ActionState::Success | ActionState::Failure => {
                     debug!("Previous action already completed. Despawning action entity.",);
@@ -549,9 +618,12 @@ fn exec_picked_action(
                         ent.despawn();
                     }
                     if let Some((Scorer(ent), score)) = scorer_info {
-                        let scorer_span = scorer_spans.get(*ent).expect("Where is it?");
-                        let _guard = scorer_span.span.enter();
-                        debug!("Winning scorer chosen with score {}", score.get());
+                        if let Ok(scorer_span) = scorer_spans.get(*ent) {
+                            let _guard = scorer_span.span.enter();
+                            debug!("Winning scorer chosen with score {}", score.get());
+                        } else {
+                            debug!("Winning scorer chosen with score {}", score.get());
+                        }
                     }
                     std::mem::drop(_guard);
                     debug!("Spawning next action");
@@ -573,8 +645,8 @@ fn exec_picked_action(
             // it as Requested if for some reason it had finished
             // but the Action System hasn't gotten around to
             // cleaning it up.
-            if *curr_action_state == ActionState::Init {
-                *curr_action_state = ActionState::Requested;
+            if curr_action_state == ActionState::Init {
+                let _ = set_action_state(states, action_ent.0, ActionState::Requested);
             }
             #[cfg(feature = "trace")]
             trace!("Continuing execution of current action.",)
@@ -588,9 +660,12 @@ fn exec_picked_action(
         // straightforward -- we set the action, Request it, and
         // that's it.
         if let Some((Scorer(ent), score)) = scorer_info {
-            let scorer_span = scorer_spans.get(*ent).expect("Where is it?");
-            let _guard = scorer_span.span.enter();
-            debug!("Winning scorer chosen with score {}", score.get());
+            if let Ok(scorer_span) = scorer_spans.get(*ent) {
+                let _guard = scorer_span.span.enter();
+                debug!("Winning scorer chosen with score {}", score.get());
+            } else {
+                debug!("Winning scorer chosen with score {}", score.get());
+            }
         }
         debug!("No current action. Spawning new action.");
         let new_action = actions::spawn_action(picked_action.1.as_ref(), cmd, actor);
